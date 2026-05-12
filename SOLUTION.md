@@ -17,7 +17,7 @@ I modified aggregation.py, probe.py, and splitting.py.
 
 The most important change was in the aggregation. The input is `prompt + response` concatenated, and the prompt is quite long because it has the full context passage in it. The response is usually just one short sentence at the end. If you average hidden states over all tokens you mostly get a noisy average of the prompt, and the response part barely shows up. I added a second pooling vector that takes the mean over only the last 64 non-padding tokens — for most examples those are the response tokens. So each selected layer now gives 3 vectors (full mean, tail mean, last token) instead of 2. Feature size went from 7168 to 10752.
 
-For the probe I used StandardScaler → PCA(80) → a single linear layer, trained with BCEWithLogitsLoss and AdamW for 300 steps. I also find the best decision threshold on a 20% holdout before the final refit. With 70% of labels being 1, the default 0.5 threshold doesn't work well for accuracy.
+For the probe I used StandardScaler → PCA(80) → a single linear layer, trained with BCEWithLogitsLoss and AdamW for 300 steps. I calibrate the decision threshold in two passes: first on a 20% holdout, then again on the full training set after the final refit, taking the higher of the accuracy-based and prevalence-based thresholds. This ensures the final probe doesn't just predict everything as 1 on an imbalanced dataset.
 
 For splits: StratifiedKFold(5) with a 15% validation split inside each fold.
 

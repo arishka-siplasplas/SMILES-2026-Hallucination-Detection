@@ -85,6 +85,12 @@ class HallucinationProbe(nn.Module):
 
         torch.manual_seed(SEED)
         self._train_weights(torch.from_numpy(Z), targets)
+
+        with torch.no_grad():
+            full_probs = torch.sigmoid(self(torch.from_numpy(Z))).numpy()
+        t_acc = _best_threshold(y, full_probs)
+        t_prev = float(np.percentile(full_probs, 100.0 * (1.0 - float(y.mean()))))
+        self._threshold = max(t_acc, t_prev)
         return self
 
     def fit_hyperparameters(
