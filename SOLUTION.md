@@ -1,45 +1,36 @@
-# Solution Report
+# Solution
 
-## Reproducibility
-
-Environment: Python 3.10+, the packages pinned in `requirements.txt` (PyTorch, transformers, scikit-learn, pandas, numpy, tqdm). No GPU is required; `solution.py` auto-selects CUDA / MPS / CPU.
+## How to run
 
 ```bash
 git clone <repo-url>
-cd SMILES-HALLUCINATION-DETECTION
+cd SMILES-2026-Hallucination-Detection
 pip install -r requirements.txt
 python solution.py
 ```
 
-Running `solution.py` writes `results.json` and `predictions.csv` to the project root. All randomness is seeded with 42 — `StratifiedKFold`, `train_test_split`, `PCA`, and `torch.manual_seed` (re-set before each weight-fitting pass in `HallucinationProbe.fit`) — so the same `predictions.csv` is produced on repeated runs. The probe has no dropout or batch-norm, so there is no train/eval-mode source of variance either.
+Python 3.11, PyTorch 2.x. Seed is 42 everywhere so predictions.csv should reproduce exactly.
 
-## Final Solution
+## What I changed
 
-Three files were modified: `aggregation.py`, `probe.py`, `splitting.py`. The rest of the codebase, including `USE_GEOMETRIC = False` in `solution.py`, is untouched.
+Three files: aggregation.py, probe.py, splitting.py.
 
-### Features (`aggregation.py`)
+The main thing that actually improved results was changing how I aggregate the hidden states. Originally I was just taking the mean over all non-padding tokens plus the last token per layer, but this mixes the long prompt together with the short response. The prompt has the full context passage plus the system/user template, so averaging over everything buries the response signal. I added a second mean that only covers the last 64 real tokens — for most examples these are almost entirely response tokens since the response is short and sits at the end. Feature dimension went from 7168 to 10752 (each of 4 layers now gives 3 vectors: full mean, tail mean, last token instead of 2).
 
-For each input I read the hidden states at layers 8, 12, 16 and 20 — a spread that covers the part of the network where, in this size of model, factual content is consolidated, while staying away from the very last layers which are dominated by next-token surface statistics. From every selected layer I take two vectors: the mean over all non-padding tokens, and the hidden state at the last real token (the `<|endoftext|>` position, which has attended to the whole prompt and response). The concatenation is 4 × 2 × 896 = 7168-dimensional. The last-token index is recovered from the attention mask, so the code is correct whichever side the tokenizer pads on. `extract_geometric_features` (layer-wise activation norms, cosine similarity between consecutive layers' pooled states, sequence length) is implemented but, since `USE_GEOMETRIC` stays off, it does not enter the submitted run.
+For the probe I used a linear classifier: StandardScaler → PCA(80) → single linear layer trained with BCEWithLogitsLoss and AdamW for 300 steps with cosine LR schedule. I started with a small MLP but it completely overfitted — train AUROC hit 100% while test AUROC was 66% and test accuracy dropped below the majority baseline. The linear probe generalizes much better. I also added threshold calibration: hold out 20% of training data, search for the threshold that maximizes accuracy on it, then refit weights on everything and keep that threshold. This matters because the default 0.5 threshold doesn't work well with 70/30 class imbalance.
 
-### Probe (`probe.py`)
+Splitting: StratifiedKFold(5) with a stratified 15% validation split carved out of each fold's training portion.
 
-`StandardScaler` → `PCA(80)` → a single linear layer (`nn.Linear(d, 1)`), trained with `BCEWithLogitsLoss`, full-batch AdamW (lr 5e-3, weight decay 1e-2) for 300 steps with a cosine schedule. The first version of this probe was a one-hidden-layer MLP; with only ~470 training rows it reached 100% train AUROC but ~66% test AUROC — it was memorising. A linear probe on a PCA-compressed feature space cannot do that: it has ~80 parameters, the train and held-out scores stay close, and it still recovers most of the linearly-decodable hallucination signal, which is what these probes rely on.
+## What didn't work
 
-`fit` also calibrates the decision threshold: it carves out a stratified 20% of the data passed to it, fits weights on the other 80%, picks the threshold that maximises accuracy on that held-out fifth, then refits the weights on the full data and keeps that threshold. This matters because `solution.py` only calls `fit` (not `fit_hyperparameters`) on the probe that produces `predictions.csv`, so without it the submission would run at a fixed 0.5 cut-off, which on a 70/30-imbalanced set is not where accuracy is maximised. `fit_hyperparameters`, used by `evaluate.py` per fold, re-tunes the same accuracy-based threshold on the official validation split.
+MLP with 64 hidden units — train AUROC 100%, test AUROC 66%, test accuracy below baseline. Classic overfitting on ~470 training samples.
 
-### Splitting (`splitting.py`)
+Late layers only (13, 17, 21, 24) — tried this first. Layers 8, 12, 16, 20 worked better, mid-network representations seem to carry more factual content in this model size.
 
-`StratifiedKFold(n_splits=5, shuffle=True)`; inside each fold a further stratified 15% of the training portion is held out for validation, giving five (train ≈ 470, val ≈ 83, test ≈ 138) splits with the class ratio preserved everywhere. Every sample lands in exactly one test fold, so when `solution.py` builds the final probe from the union of all train and validation indices it trains on the full 689-row dataset before predicting on `test.csv`.
+LinearDiscriminantAnalysis with automatic shrinkage replacing PCA+linear — in theory better because it uses class labels to find discriminative directions. In practice slightly worse (~68% test AUROC), possibly because with only ~330 samples per class the within-class covariance estimate is noisy even with shrinkage.
 
-### What helped most
+LogisticRegressionCV with grid search over C — marginally better than fixed-regularization linear (~69% AUROC) but still worse than the tail tokens aggregation.
 
-Replacing the MLP with the linear probe removed the train/test collapse and was the decisive change. Calibrating the threshold inside `fit` was the second: it moves the submitted predictions off the arbitrary 0.5 cut-off, which on this imbalanced data is worth a couple of points of accuracy.
+Adding std over tokens as an extra feature — did not move test AUROC in a consistent direction across folds.
 
-## Experiments and Discarded Ideas
-
-- **One-hidden-layer MLP (64 units).** Train AUROC 1.0, test AUROC ≈ 0.66, test accuracy below the majority baseline — textbook overfitting on 689 rows. Replaced by the linear probe.
-- **Late layers only (13, 17, 21, 24).** The first feature set used these; shifting earlier (8–20) gave a cleaner signal, consistent with mid-network layers carrying more of the factual content in a small model.
-- **PCA with 128+ components.** More components let the probe fit the training set tighter without improving held-out accuracy; 80 is roughly where the curve flattens.
-- **`pos_weight` class balancing.** With a 70/30 split and accuracy as the ranking metric, down-weighting the majority class lowered held-out accuracy. The unbalanced loss plus an accuracy-tuned threshold does better.
-- **Geometric features on (`USE_GEOMETRIC = True`).** Not part of the official run (`solution.py` keeps the flag off); in side experiments appending the norm / cosine-drift features did not move validation accuracy in a stable way, so there was nothing to gain from relying on them.
-- **Threshold tuned for F1 (the skeleton default).** Replaced with accuracy-based tuning to match the ranking metric.
+The tail tokens change was the biggest single improvement: ~68% → ~73% test AUROC.
