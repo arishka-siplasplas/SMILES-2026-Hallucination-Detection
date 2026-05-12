@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-SELECTED_LAYERS = (13, 17, 21, 24)
+SELECTED_LAYERS = (8, 12, 16, 20)
 
 
 def aggregate(
