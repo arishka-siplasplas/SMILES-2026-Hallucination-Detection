@@ -1,11 +1,10 @@
-"""Token aggregation and feature extraction for the hallucination probe."""
-
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
 SELECTED_LAYERS = (8, 12, 16, 20)
+TAIL_K = 64
 
 
 def aggregate(
@@ -13,11 +12,14 @@ def aggregate(
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
     mask = attention_mask.bool()
-    last = int(attention_mask.nonzero(as_tuple=False)[-1].item())
+    real_idx = mask.nonzero(as_tuple=False).squeeze(-1)
+    last = int(real_idx[-1].item())
+    tail_idx = real_idx[-min(TAIL_K, len(real_idx)):]
     feats = []
     for layer_idx in SELECTED_LAYERS:
         layer = hidden_states[layer_idx]
-        feats.append(layer[mask].mean(dim=0))
+        feats.append(layer[real_idx].mean(dim=0))
+        feats.append(layer[tail_idx].mean(dim=0))
         feats.append(layer[last])
     return torch.cat(feats, dim=0)
 
