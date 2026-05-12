@@ -7,8 +7,8 @@ __pycache__/
 predictions.csv
 
 # Results
-results.json
 *.json
+!results.json
 
 # HuggingFace model cache
 .cache/

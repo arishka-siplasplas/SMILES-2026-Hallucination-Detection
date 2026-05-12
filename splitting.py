@@ -1,5 +1,3 @@
-"""Stratified k-fold train/validation/test splits."""
-
 from __future__ import annotations
 
 import numpy as np

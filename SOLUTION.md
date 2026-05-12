@@ -1,36 +1,36 @@
 # Solution
 
-## How to run
+## Running
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/arishka-siplasplas/SMILES-2026-Hallucination-Detection.git
 cd SMILES-2026-Hallucination-Detection
 pip install -r requirements.txt
 python solution.py
 ```
 
-Python 3.11, PyTorch 2.x. Seed is 42 everywhere so predictions.csv should reproduce exactly.
+Python 3.11, PyTorch 2.x. Everything seeds to 42 so the output should be the same every run.
 
 ## What I changed
 
-Three files: aggregation.py, probe.py, splitting.py.
+I modified aggregation.py, probe.py, and splitting.py.
 
-The main thing that actually improved results was changing how I aggregate the hidden states. Originally I was just taking the mean over all non-padding tokens plus the last token per layer, but this mixes the long prompt together with the short response. The prompt has the full context passage plus the system/user template, so averaging over everything buries the response signal. I added a second mean that only covers the last 64 real tokens — for most examples these are almost entirely response tokens since the response is short and sits at the end. Feature dimension went from 7168 to 10752 (each of 4 layers now gives 3 vectors: full mean, tail mean, last token instead of 2).
+The most important change was in the aggregation. The input is `prompt + response` concatenated, and the prompt is quite long because it has the full context passage in it. The response is usually just one short sentence at the end. If you average hidden states over all tokens you mostly get a noisy average of the prompt, and the response part barely shows up. I added a second pooling vector that takes the mean over only the last 64 non-padding tokens — for most examples those are the response tokens. So each selected layer now gives 3 vectors (full mean, tail mean, last token) instead of 2. Feature size went from 7168 to 10752.
 
-For the probe I used a linear classifier: StandardScaler → PCA(80) → single linear layer trained with BCEWithLogitsLoss and AdamW for 300 steps with cosine LR schedule. I started with a small MLP but it completely overfitted — train AUROC hit 100% while test AUROC was 66% and test accuracy dropped below the majority baseline. The linear probe generalizes much better. I also added threshold calibration: hold out 20% of training data, search for the threshold that maximizes accuracy on it, then refit weights on everything and keep that threshold. This matters because the default 0.5 threshold doesn't work well with 70/30 class imbalance.
+For the probe I used StandardScaler → PCA(80) → a single linear layer, trained with BCEWithLogitsLoss and AdamW for 300 steps. I also find the best decision threshold on a 20% holdout before the final refit. With 70% of labels being 1, the default 0.5 threshold doesn't work well for accuracy.
 
-Splitting: StratifiedKFold(5) with a stratified 15% validation split carved out of each fold's training portion.
+For splits: StratifiedKFold(5) with a 15% validation split inside each fold.
 
-## What didn't work
+## What I tried but didn't keep
 
-MLP with 64 hidden units — train AUROC 100%, test AUROC 66%, test accuracy below baseline. Classic overfitting on ~470 training samples.
+Started with a small MLP (64 hidden units). It memorized the training data completely — train AUROC was 100%, test was 66%, test accuracy went below the majority baseline. Switched to linear.
 
-Late layers only (13, 17, 21, 24) — tried this first. Layers 8, 12, 16, 20 worked better, mid-network representations seem to carry more factual content in this model size.
+Tried using only the late layers (13, 17, 21, 24) first. Moving to layers 8, 12, 16, 20 improved things, I think earlier layers carry more of the factual signal in a small 0.5B model.
 
-LinearDiscriminantAnalysis with automatic shrinkage replacing PCA+linear — in theory better because it uses class labels to find discriminative directions. In practice slightly worse (~68% test AUROC), possibly because with only ~330 samples per class the within-class covariance estimate is noisy even with shrinkage.
+Tried LDA (LinearDiscriminantAnalysis, solver lsqr, automatic shrinkage) instead of PCA+linear. LDA should find better directions for classification since it uses the labels, but it was a bit worse in practice, probably because the dataset is small enough that the covariance estimates aren't reliable.
 
-LogisticRegressionCV with grid search over C — marginally better than fixed-regularization linear (~69% AUROC) but still worse than the tail tokens aggregation.
+Tried LogisticRegressionCV with a C grid search — slightly better than the fixed-weight AdamW linear but less than what the tail tokens gave.
 
-Adding std over tokens as an extra feature — did not move test AUROC in a consistent direction across folds.
+Adding std-pooling per layer as extra features didn't help consistently across folds.
 
-The tail tokens change was the biggest single improvement: ~68% → ~73% test AUROC.
+The tail mean was the one change that clearly improved the number.
