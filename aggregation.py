@@ -1,5 +1,3 @@
-"""Token aggregation and feature extraction for the hallucination probe."""
-
 from __future__ import annotations
 
 import torch
@@ -17,7 +15,9 @@ def aggregate(
     feats = []
     for layer_idx in SELECTED_LAYERS:
         layer = hidden_states[layer_idx]
-        feats.append(layer[mask].mean(dim=0))
+        masked = layer[mask]
+        feats.append(masked.mean(dim=0))
+        feats.append(masked.std(dim=0) if masked.shape[0] > 1 else torch.zeros(layer.shape[-1]))
         feats.append(layer[last])
     return torch.cat(feats, dim=0)
 
