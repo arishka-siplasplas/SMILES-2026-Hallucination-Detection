@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
-import torch
-import torch.nn as nn
 from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 SEED = 42
-PCA_COMPONENTS = 80
-EPOCHS = 300
+PCA_COMPONENTS = 100
 
 
 def _best_threshold(y_true: np.ndarray, probs: np.ndarray) -> float:
@@ -23,81 +22,40 @@ def _best_threshold(y_true: np.ndarray, probs: np.ndarray) -> float:
     return best_t
 
 
-class HallucinationProbe(nn.Module):
+class HallucinationProbe:
     def __init__(self) -> None:
-        super().__init__()
-        self._net: nn.Linear | None = None
-        self._scaler = StandardScaler()
-        self._pca: PCA | None = None
+        self._pipeline: Pipeline | None = None
         self._threshold: float = 0.5
 
-    def _build_network(self, input_dim: int) -> None:
-        self._net = nn.Linear(input_dim, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self._net is None:
-            raise RuntimeError(
-                "Network has not been built yet. Call fit() before forward()."
-            )
-        return self._net(x).squeeze(-1)
-
-    def _project(self, X: np.ndarray) -> torch.Tensor:
-        X = self._scaler.transform(X)
-        X = self._pca.transform(X)
-        return torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32))
-
-    def _train_weights(self, inputs: torch.Tensor, targets: torch.Tensor) -> None:
-        self._build_network(inputs.shape[1])
-        criterion = nn.BCEWithLogitsLoss()
-        optimizer = torch.optim.AdamW(self.parameters(), lr=5e-3, weight_decay=1e-2)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-        self.train()
-        for _ in range(EPOCHS):
-            optimizer.zero_grad()
-            loss = criterion(self(inputs), targets)
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-        self.eval()
+    def _build_pipeline(self, n_samples: int, n_features: int) -> Pipeline:
+        n_comp = min(PCA_COMPONENTS, n_samples - 1, n_features)
+        return Pipeline([
+            ("scaler", StandardScaler()),
+            ("pca", PCA(n_components=n_comp, random_state=SEED)),
+            ("clf", LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")),
+        ])
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "HallucinationProbe":
-        torch.manual_seed(SEED)
-        y = y.astype(np.int64)
-
-        X_std = self._scaler.fit_transform(X)
-        n_components = min(PCA_COMPONENTS, X_std.shape[0] - 1, X_std.shape[1])
-        self._pca = PCA(n_components=n_components, random_state=SEED)
-        Z = np.ascontiguousarray(self._pca.fit_transform(X_std), dtype=np.float32)
-        targets = torch.from_numpy(y.astype(np.float32))
-
+        y = y.astype(int)
         tr_idx, ho_idx = train_test_split(
             np.arange(len(y)), test_size=0.2, random_state=SEED, stratify=y
         )
-        self._train_weights(
-            torch.from_numpy(np.ascontiguousarray(Z[tr_idx])),
-            torch.from_numpy(y[tr_idx].astype(np.float32)),
-        )
-        with torch.no_grad():
-            ho_probs = torch.sigmoid(
-                self(torch.from_numpy(np.ascontiguousarray(Z[ho_idx])))
-            ).numpy()
+        pipe = self._build_pipeline(len(tr_idx), X.shape[1])
+        pipe.fit(X[tr_idx], y[tr_idx])
+        ho_probs = pipe.predict_proba(X[ho_idx])[:, 1]
         self._threshold = _best_threshold(y[ho_idx], ho_probs)
 
-        torch.manual_seed(SEED)
-        self._train_weights(torch.from_numpy(Z), targets)
+        self._pipeline = self._build_pipeline(len(y), X.shape[1])
+        self._pipeline.fit(X, y)
         return self
 
-    def fit_hyperparameters(
-        self, X_val: np.ndarray, y_val: np.ndarray
-    ) -> "HallucinationProbe":
+    def fit_hyperparameters(self, X_val: np.ndarray, y_val: np.ndarray) -> "HallucinationProbe":
         probs = self.predict_proba(X_val)[:, 1]
-        self._threshold = _best_threshold(y_val.astype(np.int64), probs)
+        self._threshold = _best_threshold(y_val.astype(int), probs)
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return (self.predict_proba(X)[:, 1] >= self._threshold).astype(int)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        with torch.no_grad():
-            probs = torch.sigmoid(self(self._project(X))).numpy()
-        return np.stack([1.0 - probs, probs], axis=1)
+        return self._pipeline.predict_proba(X)
